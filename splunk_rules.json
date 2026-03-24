@@ -1,0 +1,123 @@
+[
+  {
+    "name": "Brute Force Login Attempts",
+    "search": "index=botsv1 sourcetype=\"WinEventLog:Security\" EventCode=4625 | stats count by src_ip, user | where count > 5",
+    "description": "Detects multiple failed login attempts from same source IP",
+    "cron_schedule": "",
+    "is_scheduled": false,
+    "alert_type": "always",
+    "alert_threshold": "",
+    "disabled": false,
+    "app": "search"
+  },
+  {
+    "name": "Bucket Merge Retrieve Conf Settings",
+    "search": "| rest services/data/indexes datatype=all \n| search disabled!=1 AND bucketMerging=1 \n| dedup title \n| fields title bucketMerging bucketMerge.minMergeSizeMB bucketMerge.maxMergeSizeMB bucketMerge.maxMergeTimeSpanSecs bucketMerge.minMergeCount bucketMerge.maxMergeCount",
+    "description": "",
+    "cron_schedule": "",
+    "is_scheduled": false,
+    "alert_type": "always",
+    "alert_threshold": "",
+    "disabled": false,
+    "app": "search"
+  },
+  {
+    "name": "DLL Sideloading via Legitimate Microsoft Signed Binary",
+    "search": "index=botsv1 (EventCode=1 OR EventCode=7 OR source=\"*sysmon*\" OR source=\"*wineventlog:microsoft-windows-sysmon*\") | eval ParentImage=coalesce(ParentImage, parent_process_name, Parent_Image), Image=coalesce(Image, process_name, Process_Name), ImageLoaded=coalesce(ImageLoaded, image_loaded, Image_Loaded) | search (EventCode=1 AND (Image=\"*OneDrive*.exe\" OR Image=\"*Microsoft*.exe\") AND (CommandLine=\"*ProgramData*\" OR CommandLine=\"*temp*\" OR CommandLine=\"*users*\")) OR (EventCode=7 AND ImageLoaded=\"*version.dll\" AND (Image=\"*OneDrive*.exe\" OR Image=\"*Microsoft*.exe\") AND NOT ImageLoaded=\"C:\\\\Windows\\\\System32\\\\*\") | stats values(EventCode) as event_codes, values(CommandLine) as command_lines, values(ImageLoaded) as loaded_dlls, values(Image) as processes, dc(ImageLoaded) as dll_count, earliest(_time) as first_seen, latest(_time) as last_seen by host, Image | where (like(loaded_dlls, \"%version.dll%\") AND NOT like(loaded_dlls, \"%System32%\")) OR (like(processes, \"%OneDrive%\") AND like(loaded_dlls, \"%version.dll%\")) | eval risk_score=case(like(loaded_dlls, \"%version.dll%\") AND like(processes, \"%OneDrive%\"), 85, like(loaded_dlls, \"%version.dll%\") AND like(processes, \"%Microsoft%\"), 75, dll_count > 3, 60, 1=1, 45) | eval severity=case(risk_score >= 80, \"high\", risk_score >= 60, \"medium\", 1=1, \"low\") | where risk_score > 60 | eval attack_technique=\"T1574.002 - DLL Side-Loading\", description=\"Potential DLL sideloading detected with legitimate Microsoft binary loading suspicious DLL from non-standard location\" | sort -risk_score | head 50",
+    "description": "Detects potential DLL sideloading attacks where a legitimate Microsoft signed binary loads a suspicious DLL from an unexpected location, focusing on behavioral patterns consistent with PlugX RAT and similar threats",
+    "cron_schedule": "",
+    "is_scheduled": false,
+    "alert_type": "always",
+    "alert_threshold": "",
+    "disabled": false,
+    "app": "search"
+  },
+  {
+    "name": "Errors in the last 24 hours",
+    "search": "error OR failed OR severe OR ( sourcetype=access_* ( 404 OR 500 OR 503 ) )",
+    "description": "",
+    "cron_schedule": "",
+    "is_scheduled": false,
+    "alert_type": "always",
+    "alert_threshold": "",
+    "disabled": false,
+    "app": "search"
+  },
+  {
+    "name": "Errors in the last hour",
+    "search": "error OR failed OR severe OR ( sourcetype=access_* ( 404 OR 500 OR 503 ) )",
+    "description": "",
+    "cron_schedule": "",
+    "is_scheduled": false,
+    "alert_type": "always",
+    "alert_threshold": "",
+    "disabled": false,
+    "app": "search"
+  },
+  {
+    "name": "License Usage Data Cube",
+    "search": "index=_internal source=*license_usage.log* type=\"Usage\" | eval h=if(len(h)=0 OR isnull(h),\"(SQUASHED)\",h) | eval s=if(len(s)=0 OR isnull(s),\"(SQUASHED)\",s) | eval idx=if(len(idx)=0 OR isnull(idx),\"(UNKNOWN)\",idx) | bin _time span=1d | stats sum(b) as b by _time, pool, s, st, h, idx",
+    "description": "",
+    "cron_schedule": "",
+    "is_scheduled": false,
+    "alert_type": "always",
+    "alert_threshold": "",
+    "disabled": false,
+    "app": "search"
+  },
+  {
+    "name": "Messages by minute last 3 hours",
+    "search": "index=_internal source=\"*metrics.log\" eps \"group=per_source_thruput\" NOT filetracker | eval events=eps*kb/kbps | timechart fixedrange=t span=1m limit=5 sum(events) by series",
+    "description": "",
+    "cron_schedule": "",
+    "is_scheduled": false,
+    "alert_type": "always",
+    "alert_threshold": "",
+    "disabled": false,
+    "app": "search"
+  },
+  {
+    "name": "Orphaned scheduled searches",
+    "search": "| rest timeout=600 splunk_server=local /servicesNS/-/-/saved/searches add_orphan_field=yes count=0 \n| search orphan=1 disabled=0 is_scheduled=1 \n| eval status = if(disabled = 0, \"enabled\", \"disabled\") \n| fields title eai:acl.owner eai:acl.app eai:acl.sharing orphan status is_scheduled cron_schedule next_scheduled_time next_scheduled_time actions \n| rename title AS \"search name\" eai:acl.owner AS owner eai:acl.app AS app eai:acl.sharing AS sharing",
+    "description": "",
+    "cron_schedule": "",
+    "is_scheduled": false,
+    "alert_type": "always",
+    "alert_threshold": "",
+    "disabled": false,
+    "app": "search"
+  },
+  {
+    "name": "PowerShell Encoded Command Execution",
+    "search": "index=botsv1 sourcetype=\"XmlWinEventLog:Microsoft-Windows-Sysmon/Operational\" EventCode=1 (CommandLine=\"*-enc*\" OR CommandLine=\"*-encodedcommand*\") | table _time, Computer, User, CommandLine",
+    "description": "Detects PowerShell running with encoded commands",
+    "cron_schedule": "",
+    "is_scheduled": false,
+    "alert_type": "always",
+    "alert_threshold": "",
+    "disabled": false,
+    "app": "search"
+  },
+  {
+    "name": "Splunk errors last 24 hours",
+    "search": "index=_internal \" error \" NOT debug source=*splunkd.log*",
+    "description": "",
+    "cron_schedule": "",
+    "is_scheduled": false,
+    "alert_type": "always",
+    "alert_threshold": "",
+    "disabled": false,
+    "app": "search"
+  },
+  {
+    "name": "Web Vulnerability Scanner Detected",
+    "search": "index=botsv1 sourcetype=iis OR sourcetype=suricata \"vulnerability scanner\" OR \"nikto\" OR \"sqlmap\" OR \"nessus\" | stats count by src_ip",
+    "description": "Detects web vulnerability scanning activity",
+    "cron_schedule": "",
+    "is_scheduled": false,
+    "alert_type": "always",
+    "alert_threshold": "",
+    "disabled": false,
+    "app": "search"
+  }
+]
