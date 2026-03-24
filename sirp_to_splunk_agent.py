@@ -75,15 +75,19 @@ def get_splunk_rules(session_key):
 
 def check_coverage(incident, rules):
     """Check if any Splunk rule covers this incident's technique"""
-    technique = incident.get("data", {}).get("iti_mitre_techniques", "")
-    subtechnique = incident.get("data", {}).get("iti_mitre_subtechniques", "")
-    
-    # Simple check - look for technique ID in rule descriptions or searches
+    technique = incident.get("data", {}).get("iti_mitre_techniques") or ""
+    subtechnique = incident.get("data", {}).get("iti_mitre_subtechniques") or ""
+
+    # If no technique info, we can't confirm coverage — generate a new rule
+    if not technique.strip() and not subtechnique.strip():
+        return False, None
+
+    # Look for technique ID in rule descriptions or searches
     for rule in rules:
         rule_text = f"{rule['name']} {rule['description']} {rule['search']}".lower()
         if technique.lower() in rule_text or subtechnique.lower() in rule_text:
             return True, rule['name']
-    
+
     return False, None
 
 
