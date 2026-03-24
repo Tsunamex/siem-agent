@@ -220,44 +220,10 @@ def main():
     # Step 5: Generate new rule
     print("\n[5] Generating detection rule with LLM...")
     new_rule = generate_rule_with_llm(incident)
+    print("    LLM GENERATED RULE JSON:")
+    print(json.dumps(new_rule, indent=4))
 
-    # Step 6: Human review before deployment
-    print("\n" + "=" * 60)
-    print("REVIEW GENERATED RULE — APPROVAL REQUIRED")
-    print("=" * 60)
-    print(f"\n  Name:        {new_rule['name']}")
-    print(f"  Description: {new_rule['description']}")
-    print(f"\n  SPL Query:")
-    print(f"  {new_rule['search']}")
-    print()
-
-    while True:
-        choice = input("  Deploy this rule to Splunk? [y/n/e] (e = edit name): ").strip().lower()
-        if choice == "y":
-            break
-        elif choice == "n":
-            print("\n  Deployment cancelled. Rule was NOT pushed to Splunk.")
-            print("\n" + "=" * 60)
-            print("SUMMARY")
-            print("=" * 60)
-            print(json.dumps({
-                "incident_id": incident_id,
-                "subject": data.get("iti_subject"),
-                "technique": data.get("iti_mitre_techniques"),
-                "tactic": data.get("iti_mitre_tactics"),
-                "new_rule": new_rule["name"],
-                "status": "Cancelled"
-            }, indent=4))
-            return
-        elif choice == "e":
-            new_name = input(f"  New name [{new_rule['name']}]: ").strip()
-            if new_name:
-                new_rule["name"] = new_name
-            print(f"  Name updated to: {new_rule['name']}")
-        else:
-            print("  Please enter y, n, or e.")
-
-    # Step 7: Push to Splunk
+    # Step 6: Push to Splunk
     print("\n[6] Pushing rule to Splunk...")
     status, response = create_splunk_rule(session_key, new_rule)
     print(f"    HTTP Status: {status}")
