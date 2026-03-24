@@ -7,6 +7,7 @@ Pulls incident from SIRP, checks Splunk coverage, creates rules if missing
 import requests
 import urllib3
 import json
+import re
 import sys
 import os
 from dotenv import load_dotenv
@@ -82,11 +83,19 @@ def check_coverage(incident, rules):
     if not technique.strip() and not subtechnique.strip():
         return False, None
 
-    # Look for technique ID in rule descriptions or searches
+    # Only match against rule text if the ID looks like a proper MITRE T-ID (e.g. T1003, T1558.003)
+    # Bare numbers (e.g. "42", "1") are SIRP internal IDs — too generic to match reliably
+    mitre_pattern = re.compile(r'^t\d{4}(\.\d+)?$', re.IGNORECASE)
+    valid_terms = [t for t in [technique, subtechnique] if t and mitre_pattern.match(t.strip())]
+
+    if not valid_terms:
+        return False, None
+
     for rule in rules:
         rule_text = f"{rule['name']} {rule['description']} {rule['search']}".lower()
-        if technique.lower() in rule_text or subtechnique.lower() in rule_text:
-            return True, rule['name']
+        for term in valid_terms:
+            if re.search(rf"\b{re.escape(term.lower())}\b", rule_text):
+                return True, rule['name']
 
     return False, None
 
@@ -177,56 +186,68 @@ def main():
     print(f"\n[1] Fetching incident {incident_id} from SIRP...")
     incident = get_sirp_incident(incident_id)
     data = incident.get("data", {})
-    print(f"    ✓ {data.get('iti_subject')[:60]}...")
-    print(f"    Technique: {data.get('iti_mitre_techniques')} / {data.get('iti_mitre_subtechniques')}")
-    print(f"    Tactic: {data.get('iti_mitre_tactics')}")
-    
+    print("    RAW SIRP INCIDENT JSON:")
+    print(json.dumps({
+        "iti_subject": data.get("iti_subject"),
+        "iti_description": data.get("iti_description"),
+        "iti_mitre_tactics": data.get("iti_mitre_tactics"),
+        "iti_mitre_techniques": data.get("iti_mitre_techniques"),
+        "iti_mitre_subtechniques": data.get("iti_mitre_subtechniques"),
+        "iti_attack_severity": data.get("iti_attack_severity"),
+    }, indent=4))
+
     # Step 2: Connect to Splunk
     print("\n[2] Connecting to Splunk...")
     session_key = get_splunk_session()
-    print("    ✓ Connected")
-    
+    print(f"    Session Key: {session_key[:20]}...")
+
     # Step 3: Get existing rules
     print("\n[3] Checking existing detection coverage...")
     rules = get_splunk_rules(session_key)
-    print(f"    Found {len(rules)} detection rules")
-    
+    print(f"    Found {len(rules)} detection rules:")
+    print(json.dumps(rules, indent=4))
+
     # Step 4: Check coverage
     covered, rule_name = check_coverage(incident, rules)
-    
+
     if covered:
         print(f"\n[4] ✓ Already covered by: {rule_name}")
         print("\n    No new rule needed.")
         return
-    
-    print(f"\n[4] ✗ No existing rule covers {data.get('iti_mitre_techniques')}")
-    
+
+    print(f"\n[4] ✗ No existing rule covers technique: {data.get('iti_mitre_techniques')}")
+
     # Step 5: Generate new rule
     print("\n[5] Generating detection rule with LLM...")
     new_rule = generate_rule_with_llm(incident)
-    print(f"    ✓ Generated: {new_rule['name']}")
-    print(f"\n    SPL Query:")
-    print(f"    {new_rule['search'][:200]}...")
-    
+    print("    LLM GENERATED RULE JSON:")
+    print(json.dumps(new_rule, indent=4))
+
     # Step 6: Push to Splunk
     print("\n[6] Pushing rule to Splunk...")
     status, response = create_splunk_rule(session_key, new_rule)
-    
+    print(f"    HTTP Status: {status}")
+    print(f"    Response: {response[:500]}")
+
     if status == 201:
-        print(f"    ✓ Rule created successfully!")
+        print("    ✓ Rule created successfully!")
     elif status == 409:
-        print(f"    - Rule already exists")
+        print("    - Rule already exists in Splunk")
     else:
-        print(f"    ✗ Failed: {status} - {response[:200]}")
-    
+        print(f"    ✗ Failed to create rule")
+
     # Summary
     print("\n" + "=" * 60)
     print("SUMMARY")
     print("=" * 60)
-    print(f"Incident: {data.get('iti_subject')[:50]}...")
-    print(f"Technique: {data.get('iti_mitre_techniques')} ({data.get('iti_mitre_tactics')})")
-    print(f"New Rule: {new_rule['name']}")
-    print(f"Status: {'Created' if status == 201 else 'Exists' if status == 409 else 'Failed'}")
+    print(json.dumps({
+        "incident_id": incident_id,
+        "subject": data.get("iti_subject"),
+        "technique": data.get("iti_mitre_techniques"),
+        "tactic": data.get("iti_mitre_tactics"),
+        "new_rule": new_rule["name"],
+        "status": "Created" if status == 201 else "Exists" if status == 409 else "Failed"
+    }, indent=4))
 
 
 if __name__ == "__main__":
