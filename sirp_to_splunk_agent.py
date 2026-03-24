@@ -74,19 +74,54 @@ def get_splunk_rules(session_key):
     return rules
 
 
+def parse_payload(data):
+    """Parse iti_payload_full JSON string into structured IOC fields"""
+    raw = data.get("iti_payload_full", "") or ""
+    if not raw:
+        return {}
+    try:
+        payload = json.loads(raw) if isinstance(raw, str) else raw
+        src = payload.get("_source", payload)
+        sirp_extra = src.get("sirp", {}).get("extra", {})
+        return {
+            "mitre_technique":   src.get("sirp", {}).get("threat", {}).get("technique", ""),
+            "mitre_tactic":      src.get("sirp", {}).get("threat", {}).get("tactic", ""),
+            "process_name":      src.get("process", {}).get("name", ""),
+            "command_line":      src.get("process", {}).get("command_line", ""),
+            "file_path":         src.get("file", {}).get("path", ""),
+            "sha256":            src.get("file", {}).get("hash", {}).get("sha256", ""),
+            "src_ip":            src.get("source", {}).get("ip", ""),
+            "host":              src.get("host", {}).get("name", ""),
+            "user":              src.get("user", {}).get("name", ""),
+            "tags":              src.get("tags", []),
+            "log_source":        src.get("sirp", {}).get("log_source", ""),
+            "signature":         src.get("sirp", {}).get("signature_name", ""),
+            "event_id":          sirp_extra.get("event_id", ""),
+            "exploit":           sirp_extra.get("exploit_dropped", ""),
+            "note":              sirp_extra.get("note", ""),
+            "detection_source":  src.get("sirp", {}).get("detection_source", ""),
+            "reason":            src.get("event", {}).get("reason", ""),
+        }
+    except Exception:
+        return {}
+
+
 def check_coverage(incident, rules):
-    """Check if any Splunk rule covers this incident's technique"""
-    technique = incident.get("data", {}).get("iti_mitre_techniques") or ""
-    subtechnique = incident.get("data", {}).get("iti_mitre_subtechniques") or ""
+    """Check if any Splunk rule covers this incident's technique.
+    Falls back to payload MITRE technique if top-level field is a bare SIRP ID."""
+    data = incident.get("data", {})
+    technique = data.get("iti_mitre_techniques") or ""
+    subtechnique = data.get("iti_mitre_subtechniques") or ""
 
-    # If no technique info, we can't confirm coverage — generate a new rule
-    if not technique.strip() and not subtechnique.strip():
-        return False, None
-
-    # Only match against rule text if the ID looks like a proper MITRE T-ID (e.g. T1003, T1558.003)
-    # Bare numbers (e.g. "42", "1") are SIRP internal IDs — too generic to match reliably
     mitre_pattern = re.compile(r'^t\d{4}(\.\d+)?$', re.IGNORECASE)
+
+    # If top-level technique is not a real MITRE ID, try the payload
     valid_terms = [t for t in [technique, subtechnique] if t and mitre_pattern.match(t.strip())]
+    if not valid_terms:
+        payload = parse_payload(data)
+        payload_technique = payload.get("mitre_technique", "")
+        if payload_technique and mitre_pattern.match(payload_technique.strip()):
+            valid_terms = [payload_technique]
 
     if not valid_terms:
         return False, None
@@ -103,6 +138,7 @@ def check_coverage(incident, rules):
 def generate_rule_with_llm(incident):
     """Use LLM to generate a Splunk detection rule"""
     data = incident.get("data", {})
+    payload = parse_payload(data)
 
     instructions = "You are a detection engineer. Output a single JSON object only — no markdown, no code fences, no explanations. The first character must be { and the last must be }."
 
@@ -111,19 +147,34 @@ def generate_rule_with_llm(incident):
 INCIDENT DETAILS:
 - Subject: {data.get('iti_subject')}
 - Description: {data.get('iti_description')}
-- MITRE Tactic: {data.get('iti_mitre_tactics')}
-- MITRE Technique: {data.get('iti_mitre_techniques')}
-- MITRE Subtechnique: {data.get('iti_mitre_subtechniques')}
 - Severity: {data.get('iti_attack_severity')}
 
-PAYLOAD CONTEXT (key IOCs):
-{data.get('iti_payload_full', '')[:2000]}
+MITRE ATT&CK:
+- Tactic:     {payload.get('mitre_tactic') or data.get('iti_mitre_tactics')}
+- Technique:  {payload.get('mitre_technique') or data.get('iti_mitre_techniques')}
+
+KEY IOCs FROM ALERT:
+- Process Name:      {payload.get('process_name')}
+- Command Line:      {payload.get('command_line')}
+- File Path:         {payload.get('file_path')}
+- SHA256:            {payload.get('sha256')}
+- Source IP:         {payload.get('src_ip')}
+- Host:              {payload.get('host')}
+- User:              {payload.get('user')}
+- Event ID:          {payload.get('event_id')}
+- Exploit/Tool:      {payload.get('exploit')}
+- Signature:         {payload.get('signature')}
+- Log Source:        {payload.get('log_source')}
+- Detection Source:  {payload.get('detection_source')}
+- Tags:              {', '.join(payload.get('tags', []))}
+- Analyst Note:      {payload.get('note')}
 
 REQUIREMENTS:
 1. Create a detection rule that would catch this attack pattern
-2. Use index=botsv1 (our test dataset has Windows logs, Sysmon, IIS, Suricata, network streams)
-3. Focus on behavioral detection, not just IOC matching
-4. Include risk scoring
+2. Use index=botsv1 (available sourcetypes: WinEventLog:Security, XmlWinEventLog:Microsoft-Windows-Sysmon/Operational, suricata, iis, stream:*)
+3. Use the IOCs above to write specific, accurate field matches — do NOT invent field names
+4. Focus on behavioral detection where possible, not just hash/IP matching
+5. Include risk scoring
 
 OUTPUT FORMAT (JSON only, no markdown):
 {{
@@ -186,7 +237,7 @@ def main():
     print(f"\n[1] Fetching incident {incident_id} from SIRP...")
     incident = get_sirp_incident(incident_id)
     data = incident.get("data", {})
-    print("    RAW SIRP INCIDENT JSON:")
+    print("    INCIDENT FIELDS:")
     print(json.dumps({
         "iti_subject": data.get("iti_subject"),
         "iti_description": data.get("iti_description"),
@@ -195,6 +246,9 @@ def main():
         "iti_mitre_subtechniques": data.get("iti_mitre_subtechniques"),
         "iti_attack_severity": data.get("iti_attack_severity"),
     }, indent=4))
+    parsed = parse_payload(data)
+    print("    PARSED PAYLOAD IOCs:")
+    print(json.dumps(parsed, indent=4))
 
     # Step 2: Connect to Splunk
     print("\n[2] Connecting to Splunk...")
@@ -215,7 +269,9 @@ def main():
         print("\n    No new rule needed.")
         return
 
-    print(f"\n[4] ✗ No existing rule covers technique: {data.get('iti_mitre_techniques')}")
+    payload_technique = parse_payload(data).get("mitre_technique", "")
+    effective_technique = payload_technique or data.get("iti_mitre_techniques", "unknown")
+    print(f"\n[4] ✗ No existing rule covers technique: {effective_technique}")
 
     # Step 5: Generate new rule
     print("\n[5] Generating detection rule with LLM...")
