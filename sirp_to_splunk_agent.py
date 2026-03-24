@@ -26,8 +26,9 @@ SPLUNK_USER = os.getenv("SPLUNK_USER")
 SPLUNK_PASS = os.getenv("SPLUNK_PASS")
 SPLUNK_BASE = f"https://{SPLUNK_HOST}:{SPLUNK_PORT}"
 
-# Anthropic Config
-ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
+# LLM Config
+LLM_BASE_URL = os.getenv("LLM_BASE_URL", "http://192.9.178.195:8000")
+LLM_MODEL = os.getenv("LLM_MODEL", "meta-llama/Llama-4-Scout-17B-16E-Instruct")
 
 
 def get_sirp_incident(incident_id):
@@ -86,11 +87,13 @@ def check_coverage(incident, rules):
     return False, None
 
 
-def generate_rule_with_claude(incident):
-    """Use Claude to generate a Splunk detection rule"""
+def generate_rule_with_llm(incident):
+    """Use LLM to generate a Splunk detection rule"""
     data = incident.get("data", {})
-    
-    prompt = f"""You are a detection engineer. Create a Splunk SPL detection rule for this incident.
+
+    instructions = "You are a detection engineer. Output a single JSON object only — no markdown, no code fences, no explanations. The first character must be { and the last must be }."
+
+    input_text = f"""Create a Splunk SPL detection rule for this incident.
 
 INCIDENT DETAILS:
 - Subject: {data.get('iti_subject')}
@@ -114,34 +117,28 @@ OUTPUT FORMAT (JSON only, no markdown):
     "name": "Rule name here",
     "description": "Description here",
     "search": "Full SPL query here"
-}}
-"""
+}}"""
 
     response = requests.post(
-        "https://api.anthropic.com/v1/messages",
-        headers={
-            "x-api-key": ANTHROPIC_API_KEY,
-            "content-type": "application/json",
-            "anthropic-version": "2023-06-01"
-        },
+        f"{LLM_BASE_URL}/v1/responses",
+        headers={"Content-Type": "application/json"},
         json={
-            "model": "claude-sonnet-4-20250514",
-            "max_tokens": 2048,
-            "messages": [{"role": "user", "content": prompt}]
+            "model": LLM_MODEL,
+            "instructions": instructions,
+            "input": input_text,
+            "max_output_tokens": 2048,
+            "temperature": 0.2,
         }
     )
-    
+
     if response.status_code == 200:
-        text = response.json()["content"][0]["text"]
-        # Clean up response and parse JSON
-        text = text.strip()
+        text = response.json()["output"][0]["content"][0]["text"].strip()
         if text.startswith("```"):
-            text = text.split("```")[1]
-            if text.startswith("json"):
-                text = text[4:]
+            lines = text.splitlines()
+            text = "\n".join(lines[1:-1]).strip()
         return json.loads(text)
     else:
-        raise Exception(f"Claude API failed: {response.status_code} - {response.text}")
+        raise Exception(f"LLM API failed: {response.status_code} - {response.text}")
 
 
 def create_splunk_rule(session_key, rule):
@@ -201,8 +198,8 @@ def main():
     print(f"\n[4] ✗ No existing rule covers {data.get('iti_mitre_techniques')}")
     
     # Step 5: Generate new rule
-    print("\n[5] Generating detection rule with Claude...")
-    new_rule = generate_rule_with_claude(incident)
+    print("\n[5] Generating detection rule with LLM...")
+    new_rule = generate_rule_with_llm(incident)
     print(f"    ✓ Generated: {new_rule['name']}")
     print(f"\n    SPL Query:")
     print(f"    {new_rule['search'][:200]}...")

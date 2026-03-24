@@ -19,7 +19,8 @@ SPLUNK_USER = os.getenv("SPLUNK_USER")
 SPLUNK_PASS = os.getenv("SPLUNK_PASS")
 BASE_URL = f"https://{SPLUNK_HOST}:{SPLUNK_PORT}"
 
-ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
+LLM_BASE_URL = os.getenv("LLM_BASE_URL", "http://192.9.178.195:8000")
+LLM_MODEL = os.getenv("LLM_MODEL", "meta-llama/Llama-4-Scout-17B-16E-Instruct")
 
 def get_splunk_session():
     url = f"{BASE_URL}/services/auth/login"
@@ -46,10 +47,12 @@ def get_detection_rules(session_key):
             })
     return rules
 
-def analyze_with_claude(rules):
-    """Send rules to Claude for analysis"""
-    
-    prompt = f"""You are a senior SOC analyst and detection engineer. Analyze these Splunk detection rules and provide:
+def analyze_with_llm(rules):
+    """Send rules to LLM for analysis"""
+
+    instructions = "You are a senior SOC analyst and detection engineer."
+
+    input_text = f"""Analyze these Splunk detection rules and provide:
 
 1. **Coverage Assessment**: What MITRE ATT&CK techniques do these rules cover?
 2. **Gaps Identified**: What common attack techniques are NOT covered?
@@ -70,21 +73,19 @@ The environment has BOTSv1 dataset which includes:
 Provide actionable, specific recommendations with ready-to-use SPL queries."""
 
     response = requests.post(
-        "https://api.anthropic.com/v1/messages",
-        headers={
-            "x-api-key": ANTHROPIC_API_KEY,
-            "content-type": "application/json",
-            "anthropic-version": "2023-06-01"
-        },
+        f"{LLM_BASE_URL}/v1/responses",
+        headers={"Content-Type": "application/json"},
         json={
-            "model": "claude-sonnet-4-20250514",
-            "max_tokens": 4096,
-            "messages": [{"role": "user", "content": prompt}]
+            "model": LLM_MODEL,
+            "instructions": instructions,
+            "input": input_text,
+            "max_output_tokens": 4096,
+            "temperature": 0.2,
         }
     )
-    
+
     if response.status_code == 200:
-        return response.json()["content"][0]["text"]
+        return response.json()["output"][0]["content"][0]["text"]
     else:
         return f"Error: {response.status_code} - {response.text}"
 
@@ -104,10 +105,10 @@ def main():
     for r in rules:
         print(f"       - {r['name']}")
     
-    print("\n[3] Analyzing with Claude...")
+    print("\n[3] Analyzing with LLM...")
     print("    (This may take 30-60 seconds)\n")
-    
-    analysis = analyze_with_claude(rules)
+
+    analysis = analyze_with_llm(rules)
     
     print("=" * 60)
     print("ANALYSIS RESULTS")

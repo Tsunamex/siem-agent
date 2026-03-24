@@ -1,173 +1,124 @@
-# SOC Detection Rules Analysis
+### Coverage Assessment
 
-## 1. Coverage Assessment (MITRE ATT&CK Techniques)
+The current detection rules cover the following MITRE ATT&CK techniques:
 
-**Current rules cover:**
-- **T1110.001** - Brute Force: Password Guessing (Rule 1)
-- **T1059.001** - Command and Scripting Interpreter: PowerShell (Rule 2)
-- **T1595.001** - Active Scanning: Scanning IP Blocks (Rule 3)
-- **T1595.002** - Active Scanning: Vulnerability Scanning (Rule 3)
+1. **Brute Force Login Attempts**: 
+   - Technique: T1110 (Brute Force)
+   - Description: Detects multiple failed login attempts from the same source IP.
 
-## 2. Gaps Identified
+2. **DLL Sideloading via Legitimate Microsoft Signed Binary**:
+   - Technique: T1574.002 (DLL Side-Loading)
+   - Description: Detects potential DLL sideloading attacks where a legitimate Microsoft signed binary loads a suspicious DLL from an unexpected location.
 
-**Critical missing coverage:**
-- Lateral Movement (T1021.*)
-- Credential Dumping (T1003.*)
-- Defense Evasion (T1070.*, T1055.*)
-- Data Exfiltration (T1041, T1048.*)
-- Persistence mechanisms (T1053.*, T1547.*)
-- Command & Control (T1071.*, T1105)
-- Discovery techniques (T1082, T1016, T1057)
+3. **PowerShell Encoded Command Execution**:
+   - Technique: T1059.001 (PowerShell)
+   - Sub-technique: T1027 (Obfuscated Files or Information)
+   - Description: Detects PowerShell running with encoded commands.
 
-## 3. Rule Improvements
+4. **Web Vulnerability Scanner Detected**:
+   - Technique: T1595 (Vulnerability Scanning)
+   - Description: Detects web vulnerability scanning activity.
 
-### Rule 1: Brute Force Login Attempts
-**Issues:** No time window, ignores successful attempts after failures, no account lockout correlation
+### Gaps Identified
 
-**Improved version:**
-```splunk
-index=botsv1 sourcetype="WinEventLog:Security" (EventCode=4625 OR EventCode=4624) 
-| bucket _time span=10m 
-| stats count(eval(EventCode=4625)) as failed_attempts, 
-        count(eval(EventCode=4624)) as successful_attempts, 
-        dc(user) as unique_users by src_ip, _time 
-| where failed_attempts >= 5 AND successful_attempts < 2
-| eval risk_score = case(
-    failed_attempts > 20, "High",
-    failed_attempts > 10, "Medium", 
-    1=1, "Low"
-)
-| table _time, src_ip, failed_attempts, successful_attempts, unique_users, risk_score
+Common attack techniques NOT covered by these rules:
+
+1. **Lateral Movement (T lateral movement)**:
+   - Techniques like T1021 (Remote Services), T1055 (Process Injection), and T1077 (Windows Management Instrumentation) are not covered.
+
+2. **Persistence and Defense Evasion**:
+   - Techniques such as T1197 (BITS Jobs), T1216 (LSASS Memory Dump), and T1003 (OS Credential Dumping) are not covered.
+
+3. **Command and Control (C2) Communication**:
+   - Techniques like T1105 (Ingress Tool Transfer) and T1071 (Standard Application Layer Protocol) are not covered.
+
+### Rule Improvements
+
+#### 1. Brute Force Login Attempts
+
+- **Reduce False Positives**: Implement a more sophisticated algorithm to distinguish between brute force attacks and legitimate failed login attempts. Consider adding a time window and IP reputation scoring.
+- **Catch More Variants**: Include other event codes related to authentication, such as 4771 (Kerberos authentication).
+
+Example Improvement:
+```spl
+index=botsv1 sourcetype="WinEventLog:Security" (EventCode=4625 OR EventCode=4771) 
+| stats count by src_ip, user 
+| where count > 10 
+| eval risk_score=case(count > 20, 80, 1=1, 40)
+| eval severity=case(risk_score >= 80, "high", 1=1, "medium")
 ```
 
-### Rule 2: PowerShell Encoded Command Execution
-**Issues:** Missing obfuscation variants, no command decoding, lacks context
+#### 2. DLL Sideloading via Legitimate Microsoft Signed Binary
 
-**Improved version:**
-```splunk
+- **Reduce False Positives**: Enhance filtering to exclude known good DLL loads.
+- **Catch More Variants**: Include monitoring for other Microsoft binaries and suspicious DLLs.
+
+Example Improvement:
+```spl
+index=botsv1 (EventCode=1 OR EventCode=7 OR source="*sysmon*" OR source="*wineventlog:microsoft-windows-sysmon*")
+| eval ParentImage=coalesce(ParentImage, parent_process_name, Parent_Image), 
+      Image=coalesce(Image, process_name, Process_Name), 
+      ImageLoaded=coalesce(ImageLoaded, image_loaded, Image_Loaded)
+| search (EventCode=1 AND (Image="*Microsoft*.exe" OR Image="*Windows*.exe") AND 
+          (CommandLine="*ProgramData*" OR CommandLine="*temp*" OR CommandLine="*users*"))
+| stats values(EventCode) as event_codes, values(CommandLine) as command_lines, 
+        values(ImageLoaded) as loaded_dlls, values(Image) as processes, 
+        dc(ImageLoaded) as dll_count, earliest(_time) as first_seen, 
+        latest(_time) as last_seen by host, Image
+| where like(loaded_dlls, "%suspicious.dll%")
+```
+
+#### 3. PowerShell Encoded Command Execution
+
+- **Reduce False Positives**: Filter out known legitimate encoded commands.
+- **Catch More Variants**: Monitor for other obfuscation techniques.
+
+Example Improvement:
+```spl
 index=botsv1 sourcetype="XmlWinEventLog:Microsoft-Windows-Sysmon/Operational" EventCode=1 
-(CommandLine="*-enc*" OR CommandLine="*-e *" OR CommandLine="*-encodedcommand*" 
-OR CommandLine="*-EncodedCommand*" OR CommandLine="*powershell*" CommandLine="*frombase64string*"
-OR CommandLine="*invoke-expression*" OR CommandLine="*iex*")
-| regex CommandLine="(?i)(enc|encodedcommand|frombase64|iex|invoke-expression)"
-| eval decoded_command = if(match(CommandLine, "(?i)-enc\w*\s+([A-Za-z0-9+/=]+)"), "Base64_Detected", "Obfuscated")
-| eval parent_process = coalesce(ParentCommandLine, "Unknown")
-| eval risk_score = case(
-    match(CommandLine, "(?i)(downloadstring|downloadfile|invoke-webrequest)"), "High",
-    match(CommandLine, "(?i)(bypass|unrestricted|hidden)"), "Medium",
-    1=1, "Low"
-)
-| table _time, Computer, User, CommandLine, parent_process, decoded_command, risk_score
+| eval command_line=coalesce(CommandLine, process_command_line)
+| search command_line="*-enc*" OR command_line="*-encodedcommand*"
+| eval risk_score=case(like(command_line, "%-encodedcommand%"), 80, 1=1, 40)
+| eval severity=case(risk_score >= 80, "high", 1=1, "medium")
 ```
 
-### Rule 3: Web Vulnerability Scanner
-**Issues:** Static signature matching, no rate-based detection, missing user agents
+#### 4. Web Vulnerability Scanner Detected
 
-**Improved version:**
-```splunk
-index=botsv1 (sourcetype=iis OR sourcetype=suricata OR sourcetype=stream:http) 
-| eval is_scanner = case(
-    match(cs_User_Agent, "(?i)(nikto|sqlmap|nessus|openvas|nmap|burp|zap|acunetix)"), 1,
-    match(cs_uri_stem, "(?i)(\.\.\/|union\s+select|<script|etc\/passwd|admin\/|phpmyadmin)"), 1,
-    sc_status IN (404, 403, 500) AND match(cs_uri_stem, "(?i)\.(php|asp|jsp|cgi)"), 1,
-    1=1, 0
-)
-| where is_scanner=1
-| bucket _time span=5m
-| stats count as requests, 
-        dc(cs_uri_stem) as unique_paths,
-        dc(sc_status) as status_codes,
-        values(cs_User_Agent) as user_agents by src_ip, _time
-| where requests > 10 OR unique_paths > 5
-| eval confidence = case(
-    requests > 50 AND unique_paths > 20, "High",
-    requests > 20 AND unique_paths > 10, "Medium",
-    1=1, "Low"
-)
-| table _time, src_ip, requests, unique_paths, status_codes, confidence
+- **Reduce False Positives**: Implement a more specific signature for known vulnerability scanners.
+- **Catch More Variants**: Include monitoring for other scanning tools.
+
+Example Improvement:
+```spl
+index=botsv1 sourcetype=iis OR sourcetype=suricata 
+| regex request_uri="(?i)(vulnerability|nikto|sqlmap|nessus)"
 ```
 
-## 4. New Rules Needed
+### New Rules Needed
 
-### Rule A: Credential Dumping Detection (T1003.001/002)
-```splunk
-index=botsv1 sourcetype="XmlWinEventLog:Microsoft-Windows-Sysmon/Operational" EventCode=1
-(CommandLine="*lsass*" OR CommandLine="*procdump*" OR CommandLine="*mimikatz*" 
-OR CommandLine="*sekurlsa*" OR CommandLine="*hashdump*" OR CommandLine="*pwdump*"
-OR CommandLine="*gsecdump*" OR Image="*\\lsass.exe")
-OR (sourcetype="WinEventLog:Security" EventCode=4656 ObjectName="*\\lsass.exe" AccessMask="0x1010")
-OR (sourcetype="XmlWinEventLog:Microsoft-Windows-Sysmon/Operational" EventCode=10 
-    TargetImage="*\\lsass.exe" GrantedAccess IN ("0x1010", "0x1fffff", "0x143a"))
-| eval technique = case(
-    match(CommandLine, "(?i)(procdump.*lsass|lsass.*dump)"), "LSASS_Dump",
-    match(CommandLine, "(?i)mimikatz"), "Mimikatz",
-    EventCode=10, "Process_Access",
-    1=1, "Credential_Access"
-)
-| eval risk_level = case(
-    technique="Mimikatz", "Critical",
-    technique="LSASS_Dump", "High",
-    1=1, "Medium"
-)
-| table _time, Computer, User, technique, CommandLine, SourceImage, TargetImage, risk_level
+#### 1. Detecting Potential Ransomware Activity
+
+```spl
+index=botsv1 sourcetype="WinEventLog:Security" EventCode=4656 
+| search ObjectName="*\\file.sys" 
+| eval risk_score=case(like(ObjectName, "%ransomware%"), 90, 1=1, 50)
+| eval severity=case(risk_score >= 90, "high", 1=1, "medium")
 ```
 
-### Rule B: Lateral Movement via SMB (T1021.002)
-```splunk
-index=botsv1 (sourcetype="WinEventLog:Security" EventCode=4624 LogonType=3)
-OR (sourcetype="XmlWinEventLog:Microsoft-Windows-Sysmon/Operational" EventCode=3 
-    DestinationPort IN (445, 139))
-OR (sourcetype=stream:smb)
-| eval auth_event = if(EventCode=4624, 1, 0)
-| eval network_conn = if(EventCode=3, 1, 0)
-| bucket _time span=2m
-| stats sum(auth_event) as authentications,
-        sum(network_conn) as smb_connections,
-        dc(Computer) as unique_hosts,
-        dc(dest_ip) as unique_destinations by src_ip, user, _time
-| where authentications > 0 AND unique_hosts > 2 AND _time > relative_time(now(), "-1h")
-| eval lateral_movement_score = (unique_hosts * 2) + authentications
-| where lateral_movement_score > 5
-| eval severity = case(
-    unique_hosts > 5, "High",
-    unique_hosts > 3, "Medium",
-    1=1, "Low"
-)
-| table _time, src_ip, user, unique_hosts, authentications, smb_connections, severity
+#### 2. Detecting Unusual Network Connections
+
+```spl
+index=botsv1 sourcetype=suricata 
+| stats count by dst_ip 
+| where count > 100 
+| eval risk_score=case(count > 500, 80, 1=1, 40)
+| eval severity=case(risk_score >= 80, "high", 1=1, "medium")
 ```
 
-### Rule C: DNS Tunneling Detection (T1071.004)
-```splunk
-index=botsv1 sourcetype=stream:dns OR sourcetype="suricata"
-| eval query_length = len(query)
-| eval subdomain_count = (len(query) - len(replace(query, ".", "")))
-| eval entropy = case(
-    match(query, "[0-9a-f]{8,}"), 3,
-    match(query, "[a-z0-9]{15,}"), 2,
-    1=1, 1
-)
-| where query_length > 50 OR subdomain_count > 5 OR entropy >= 2
-| bucket _time span=5m
-| stats count as dns_queries,
-        avg(query_length) as avg_length,
-        max(query_length) as max_length,
-        dc(query) as unique_queries,
-        values(query) as sample_queries by src_ip, dest_ip, _time
-| where dns_queries > 10 AND (avg_length > 40 OR max_length > 100)
-| eval tunneling_score = case(
-    avg_length > 80 AND dns_queries > 50, "High",
-    avg_length > 60 AND dns_queries > 20, "Medium",
-    1=1, "Low"
-)
-| table _time, src_ip, dest_ip, dns_queries, avg_length, max_length, unique_queries, tunneling_score
+#### 3. Detecting LSASS Memory Dumping
+
+```spl
+index=botsv1 sourcetype="XmlWinEventLog:Microsoft-Windows-Sysmon/Operational" EventCode=1 
+| search CommandLine="*procdump.exe*" OR CommandLine="*lsass*" 
+| eval risk_score=case(like(CommandLine, "%lsass%"), 90, 1=1, 50)
+| eval severity=case(risk_score >= 90, "high", 1=1, "medium")
 ```
-
-## Implementation Recommendations
-
-1. **Deploy rules in test mode first** - Monitor for false positives over 48 hours
-2. **Set up correlation searches** - Link related events across different data sources
-3. **Create response playbooks** - Define escalation procedures for each rule
-4. **Schedule regular reviews** - Weekly tuning sessions to adjust thresholds
-5. **Implement risk-based scoring** - Use enterprise security framework for consistent scoring
-
-These improvements will provide comprehensive coverage across the cyber kill chain while minimizing analyst fatigue through intelligent filtering and risk-based prioritization.
